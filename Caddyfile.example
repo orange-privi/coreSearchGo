@@ -1,0 +1,29 @@
+# CoAutoResearch 源站反向代理示例（配合 Cloudflare 代理 DNS）
+#
+# 用途：这台服务器有公网 IP，把 ying.cc.cd 的 A 记录指向它并开启 Cloudflare
+#       代理（橙云）。Cloudflare 只回源到标准端口，因此需要一个反代在 443 上
+#       终结 TLS，再转发到面板的 127.0.0.1:8765。
+#
+# 放置：宿主机 /etc/caddy/Caddyfile（或用下方命令把本文件拷过去再改域名）
+#
+# 证书：Cloudflare 控制台 → SSL/TLS → Origin Server → Create Certificate，
+#       为主机名 ying.cc.cd 创建源站证书，下载后保存为下面两个路径。
+#       Cloudflare 的 SSL/TLS 加密模式设为 **Full (strict)**。
+#
+# 面板本身仍要求访问密钥（COAUTO_REMOTE_AUTH_TOKEN），这里只是网络层入口。
+
+ying.cc.cd {
+	encode gzip
+
+	# Cloudflare 源站证书（对应 SSL/TLS 模式 Full (strict)）
+	tls /etc/caddy/certs/ying.cc.cd.pem /etc/caddy/certs/ying.cc.cd.key
+
+	# 可选加固：只接受来自 Cloudflare 回源 IP 段的连接，直接访问源站 IP 一律 403。
+	# 使用前请对照 https://www.cloudflare.com/ips/ 核对下表（会变）。
+	# @notcf not remote_ip 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
+	# respond @notcf 403
+
+	# 关键：Caddy 默认会把原始 Host 转发给上游，并补上 X-Forwarded-Proto。
+	# 面板据此判断 HTTPS 并给登录 cookie 加 Secure；不要清掉这两个头。
+	reverse_proxy 127.0.0.1:8765
+}

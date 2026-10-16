@@ -207,6 +207,9 @@ REMOTE_AUTH_COOKIE = "coauto_remote_auth"
 UI_BIND_HOST = "127.0.0.1"
 UI_ALLOWED_HOSTS = tuple(item.strip() for item in os.environ.get("COAUTO_ALLOWED_HOSTS", "").split(",") if item.strip())
 UI_ALLOWED_ORIGINS = tuple(item.strip() for item in os.environ.get("COAUTO_ALLOWED_ORIGINS", "").split(",") if item.strip())
+# Opt-in: tolerate the opaque "Origin: null" that some local proxies / browser shells
+# inject into same-site form posts. Off by default; see v2_security.validate_request_site.
+UI_ALLOW_OPAQUE_ORIGIN = os.environ.get("COAUTO_ALLOW_OPAQUE_ORIGIN", "").strip().lower() in {"1", "true", "yes"}
 AUTO_RESOURCE_SEARCH_MAX_RESULTS = 8
 AUTO_RESOURCE_SEARCH_MAX_DIRS = 2500
 AUTO_RESOURCE_SEARCH_MAX_DEPTH = 5
@@ -27013,6 +27016,7 @@ button{{background:#171717;border:0;color:white;cursor:pointer;margin-top:.8rem}
                 bind_host=UI_BIND_HOST,
                 allowed_hosts=UI_ALLOWED_HOSTS,
                 allowed_origins=UI_ALLOWED_ORIGINS,
+                allow_opaque_origin=UI_ALLOW_OPAQUE_ORIGIN,
             )
             length = bounded_content_length(self.headers, 4096)
             form = parse_qs(self.rfile.read(length).decode("utf-8", errors="strict"), keep_blank_values=True)
@@ -27066,6 +27070,7 @@ button{{background:#171717;border:0;color:white;cursor:pointer;margin-top:.8rem}
                 bind_host=UI_BIND_HOST,
                 allowed_hosts=UI_ALLOWED_HOSTS,
                 allowed_origins=UI_ALLOWED_ORIGINS,
+                allow_opaque_origin=UI_ALLOW_OPAQUE_ORIGIN,
             )
         except SecurityBoundaryError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=exc.status)

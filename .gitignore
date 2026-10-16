@@ -11,6 +11,7 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+!.env.docker.example
 .claude/
 .agents/skills/
 secrets/*

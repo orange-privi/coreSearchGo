@@ -60,8 +60,18 @@ def validate_request_site(
     bind_host: str = "127.0.0.1",
     allowed_hosts: Iterable[str] = (),
     allowed_origins: Iterable[str] = (),
+    allow_opaque_origin: bool = False,
 ) -> None:
-    """Reject DNS rebinding and cross-site mutation before route dispatch."""
+    """Reject DNS rebinding and cross-site mutation before route dispatch.
+
+    ``allow_opaque_origin`` accepts the opaque ``Origin: null`` value that some local
+    proxies, browser shells, or endpoint-security products inject into same-site form
+    posts. The exemption is narrow: it only applies *after* the Host has been accepted
+    and the cross-site mutation check has passed, so DNS-rebinding, host, and
+    cross-site rejection are unchanged. Unauthenticated remote requests are still
+    refused before this point, and the access-token gate still protects the login.
+    Off by default; enable deliberately via ``COAUTO_ALLOW_OPAQUE_ORIGIN``.
+    """
 
     host = _hostname(str(headers.get("Host") or ""))
     configured_hosts = {str(item).lower().rstrip(".") for item in allowed_hosts if str(item).strip()}
@@ -85,6 +95,11 @@ def validate_request_site(
     origin = str(headers.get("Origin") or "").strip()
     if not origin:
         return  # Non-browser clients still require remote bearer authentication.
+    if allow_opaque_origin and origin.lower() == "null":
+        # Opaque origin injected by some local proxies / browser shells. The Host was
+        # already accepted above and cross-site fetches were already rejected, so this
+        # only relaxes the foreign-origin defense-in-depth for authenticated requests.
+        return
     configured_origins = {str(item).rstrip("/") for item in allowed_origins if str(item).strip()}
     try:
         parsed = urlsplit(origin)

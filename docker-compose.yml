@@ -1,0 +1,148 @@
+# CoAutoResearch 面板 —— Docker Compose（自建，无官方镜像）
+#
+# 兼容性：同时适配 docker-compose v1.29.2（老的 Python 版）和 v2（docker compose 插件）。
+#   - 顶层**不能**写 Compose Spec 的 `name:` 字段（v1 只认 services / volumes / networks / x-*，
+#     写了会直接报 "'name' does not match any of the regexes: '^x-'"），
+#     项目名用命令行 `-p coauto` 指定：v1.29.2 **不读** .env 里的 COMPOSE_PROJECT_NAME，
+#     只有 v2 才读。两边都写上是双保险。
+#   - 顶层必须显式写 `version:`，否则 v1 会当成无 version 的"一代格式"来解析，同样报错。
+#   - 不使用 profiles / bind.create_host_path 等 v2-only 语法。
+#
+# ⚠️ 与 Docker Engine 版本的兼容性（实测踩过，务必知道）:
+#   docker-compose v1.29.2 与 Docker Engine >= 25 **不兼容**。改完 .env 后执行
+#   `docker-compose up -d`，一旦需要重建容器就会崩在：
+#       KeyError: 'ContainerConfig'    (compose/service.py:1579 get_container_data_volumes)
+#   原因是新 Engine 的 docker inspect 不再返回 ContainerConfig 字段；而且它是
+#   "先把旧容器删掉、再崩"，结果容器直接消失。首次 up 之所以能成功，只是因为没有旧容器。
+#   → 请改用 Compose v2 插件（`docker compose`，注意是空格，不是 `docker-compose`）。
+#     免 apt 安装（装进 CLI 插件目录即可被 docker 自动发现）:
+#       mkdir -p /usr/local/lib/docker/cli-plugins
+#       curl -fSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(dpkg --print-architecture)" \
+#         -o /usr/local/lib/docker/cli-plugins/docker-compose
+#       chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+#       docker compose version
+#   下文所有命令均以 v2（`docker compose`）为准。
+#
+# 使用前:
+#   cp .env.docker.example .env      # 至少填 REPO_DIR（绝对路径）
+#   docker-compose build             # 要论文链路: WITH_PAPER=1 docker-compose build
+#   docker-compose up -d
+#   docker-compose logs -f           # 这里能看到 SSH 隧道指令和访问密钥
+#
+# 更新（仓库是只读挂载，不打进镜像）:
+#   git -C "$REPO_DIR" pull && docker-compose restart
+#
+# 注意：.env 与 COMPOSE_PROJECT_NAME 都按"compose 文件所在目录"解析，
+#       所以本文件在哪，.env 就得在哪（同一目录）。
+
+version: "3.8"
+
+services:
+  coauto:
+    build:
+      context: .
+      args:
+        WITH_PAPER: "${WITH_PAPER:-0}"
+        APP_UID: "${APP_UID:-1000}"
+        APP_GID: "${APP_GID:-1000}"
+        CLAUDE_CODE_PKG: "${CLAUDE_CODE_PKG:-@anthropic-ai/claude-code@latest}"
+        # ---- 构建期网络开关（国内服务器常需要；留空走官方源/直连）----
+        # npm 源，例如 https://registry.npmmirror.com
+        NPM_REGISTRY: "${NPM_REGISTRY:-}"
+        # NodeSource 安装脚本地址，留空用官方 https://deb.nodesource.com/setup_22.x
+        NODESOURCE_SETUP_URL: "${NODESOURCE_SETUP_URL:-}"
+        # 构建期代理。注意：**不要**把 runtime 的 HTTPS_PROXY 直接塞进来，
+        # 因为构建容器里的 127.0.0.1 不是宿主机，会连不上；
+        # 走宿主机代理请填 172.17.0.1:端口（docker0 网关）这类可达地址。
+        BUILD_HTTP_PROXY: "${BUILD_HTTP_PROXY:-}"
+        BUILD_HTTPS_PROXY: "${BUILD_HTTPS_PROXY:-}"
+    image: coauto-research:${COAUTO_VERSION:-2.0.1}
+    container_name: coauto
+
+    # host 网络：容器的 127.0.0.1 就是宿主机回环。
+    # 这样和官方「只绑回环 + SSH 隧道」的模型完全一致 —— 面板照旧只监听 127.0.0.1，
+    # 不发布任何端口，宿主机上任何进程/隧道都能直接访问它。
+    # 代价：容器失去独立的网络命名空间（多一层隔离没了）。
+    # 仅适用于 Linux 宿主机；Docker Desktop(macOS/Windows) 不支持 host 网络。
+    network_mode: host
+
+    restart: unless-stopped
+
+    environment:
+      # 不启动 Cloudflare 隧道，只打印 SSH 端口转发指令
+      COAUTO_REMOTE_MODE: ssh
+      # 仅用于让面板打印出完整的 ssh -L 命令（面板不会猜你的机器名）
+      COAUTO_REMOTE_TARGET: "${COAUTO_REMOTE_TARGET:-}"
+      # >= 32 字符的固定访问密钥；留空则每次启动随机生成
+      COAUTO_REMOTE_AUTH_TOKEN: "${COAUTO_REMOTE_AUTH_TOKEN:-}"
+
+      COAUTO_PYTHON: /usr/local/bin/python3
+
+      # 无头环境登录 Claude 的首选方式。
+      # 留空则改用: docker-compose exec coauto claude auth login
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"
+
+      # 服务器需经 HTTP 代理出海时设置；会被 agent 子进程继承
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-127.0.0.1,localhost}"
+
+      # 强制运行时后端（只接受 codex / claude，其他值会被忽略并告警）。
+      # 留空 = 跟随面板 Settings 里的选择，而**默认值是 codex**
+      # （bin/auto-research.js:1436 selectedAgentBackend() 的兜底就是 codex）。
+      # ⚠️ 经典坑：这个变量必须**在这里透传**才会进容器；只写进 .env 是没用的，
+      #    因为 .env 只参与 compose 插值，不会自动变成容器内进程的环境变量。
+      COAUTO_AGENT_BACKEND: "${COAUTO_AGENT_BACKEND:-}"
+
+      # 公网/反代场景（Cloudflare 代理 DNS、具名隧道、nginx/Caddy 等）：
+      # 浏览器面向的 host 与 origin 允许清单，逗号分隔。
+      # ⚠️ 和 COAUTO_AGENT_BACKEND 一样，必须在这里**透传**才会进容器；
+      #    只写进 .env 是无效的（.env 只参与 compose 插值）。
+      # 例：COAUTO_ALLOWED_HOSTS=ying.cc.cd
+      #     COAUTO_ALLOWED_ORIGINS=https://ying.cc.cd
+      COAUTO_ALLOWED_HOSTS: "${COAUTO_ALLOWED_HOSTS:-}"
+      COAUTO_ALLOWED_ORIGINS: "${COAUTO_ALLOWED_ORIGINS:-}"
+
+      # 可选逃生阀：某些本机代理/浏览器外壳/终端安全产品会把同源表单 POST 的
+      # Origin 改写成 "null"，导致 "Invalid Origin header."。设为 1 后，已允许的
+      # Host 上的这种不透明 Origin 会被容忍（仅在 Host 校验与跨站校验通过之后生效）。
+      # 默认留空 = 关闭。仅在你确认这是本机中间件造成时开启。
+      COAUTO_ALLOW_OPAQUE_ORIGIN: "${COAUTO_ALLOW_OPAQUE_ORIGIN:-}"
+
+    volumes:
+      # 你已 clone 到服务器的那份仓库，只读挂载。
+      # CLI 按脚本自身路径解析模板，只读没有问题；git pull 即可更新。
+      # ⚠️ 若 REPO_DIR 指向一个不存在的路径，Docker 会**静默创建一个空目录**挂进来
+      #    （不会报错），随后面板找不到代码。启动前务必先自检，见 README 9.2。
+      - "${REPO_DIR:?请在 .env 中设置 REPO_DIR 为你 clone 的仓库绝对路径}:/opt/coauto:ro"
+
+      # 研究产物（宿主机可见，方便直接拿文件）
+      # 按 AGENTS.md 的要求放在仓库之外
+      - "${PROJECTS_DIR:-./projects}:/home/coauto/coauto-projects"
+
+      # 登录凭证、paper-tools 缓存、全局状态（guards / runtime / server-locks）
+      - coauto-home:/home/coauto
+
+    # ---------------------------------------------------------------------
+    # 论文生成：默认关掉下面的放开项。
+    #
+    # paper_export.py:339 给 Claude 传的是
+    #   sandbox.enabled=true + failIfUnavailable=true + allowUnsandboxedCommands=false
+    # 即「沙箱起不来就硬失败，且不允许绕过沙箱」。而 bubblewrap 在容器里能否创建
+    # 用户命名空间，取决于宿主机内核 sysctl、Docker 的 seccomp/apparmor 配置，
+    # 以及容器是否拿到了足够权限 —— 各发行版差异很大，没有一组放之四海皆准的参数。
+    #
+    # 下面是最常见的一组候选配置。启用前请先用 README 里的 bwrap 探测命令实测，
+    # 不要盲信。如果你不想为了论文生成削弱容器隔离，就在宿主机上跑论文生成那一步。
+    #
+    # cap_add:
+    #   - SYS_ADMIN
+    # security_opt:
+    #   - seccomp:unconfined
+    #   - apparmor:unconfined
+    # sysctls:
+    #   kernel.unprivileged_userns_clone: "1"
+    # ---------------------------------------------------------------------
+
+volumes:
+  coauto-home:
